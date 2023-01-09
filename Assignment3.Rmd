@@ -1,0 +1,285 @@
+---
+title: "Assignment 3"
+author: "Me!_859"
+date: "2/17/2021"
+output: pdf_document
+---
+
+```{r, echo=FALSE, include=FALSE}
+knitr::opts_chunk$set(include=TRUE, message=F, warning=F, echo=FALSE)
+options(digits=3)
+# To control the font size of Latex output
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\n \\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+})
+# Libraries
+library(tidyverse)
+library(tidymodels)
+library(stargazer)
+library(janitor)
+library(kableExtra)
+library(dplyr)
+library(AER)
+library(car)
+library(carData)
+library(margins)
+library(modelr)
+```
+
+
+```{r, echo=FALSE, include=FALSE}
+getwd()
+setwd("/Users/samo/Documents/CSS program/Discrete choice /assignment/Assignment 3")
+ess_2010 <-read_csv("ESS2010.csv")
+
+# transform education variable "eisced" to factor:
+edu_labs <- c(
+  "<lower secondary",
+  "lower secondary",
+  "low upper secondary",
+  "high upper secondary",
+  "advanced vocational",
+  "BA or equivalent",
+  ">=MA level")
+
+## transform creative variable "ipcrtiv" to factor:
+creative_labs <- c(
+  "<Not like me at all",
+  "Not like me",
+  "little like me",
+  "Somewhat like me",
+  "Like me",
+  "Very much like me")
+
+ess <- ess_2010 %>% mutate(edu = factor(eisced,labels=edu_labs))%>% mutate(ipcrtiv2 = factor(ipcrtiv,labels=creative_labs))
+
+# to break continuous variable into deciles and represent by mean
+quantpoints <- function(x,probs=seq(0.1,0.9,0.1),fun=median) {
+  ints<-findInterval(x,quantile(x,probs))+1
+  stat<-sort(sapply(split(x,ints),fun,na.rm=TRUE,simplify = T))
+  return(stat[ints])
+}
+# models:
+m1<-glm(freqnet~agea, data=ess)
+m2<-glm(freqnet~agea, family="binomial",data=ess)
+m3<-glm(freqnet~edu,data=ess)
+m4<-glm(freqnet~edu,family="binomial", data=ess)
+m5 <- glm(freqnet~agea+edu, data=ess)
+m6 <- glm(freqnet~agea+edu, family="binomial", data=ess)
+
+
+# treat `ipcrtiv` as a continuous covariate
+lr1 <-  glm(freqnet~ agea + edu + ipcrtiv, family="binomial", data= ess)
+# treat `ipcrtiv` as a factor variable
+lr2 <-  glm(freqnet~ agea + edu + ipcrtiv2, family="binomial", data=ess)
+
+# models to be nested
+mo1 <- glm(freqnet~agea+edu, family = "binomial", data = ess)
+mo2 <-  glm(freqnet~ agea + edu + ipcrtiv, family="binomial", data= ess)
+mo3 <-  glm(freqnet~ agea + edu + ipcrtiv2, family = "binomial", data=ess)
+```
+
+```{r, echo=FALSE}
+# predictions:
+## age variable:
+logistic<-function(x) { 1/(1+exp(-x))}  
+ess %>% group_by(agea) %>% 
+  summarize(n()) -> 
+  pred_age
+mapply(augment,list(lm = m1, lr= m2),
+       MoreArgs = list(newdata=pred_age,type.predict="link",se_fit=T),SIMPLIFY = F) %>% bind_rows( .id="Model") %>% 
+  mutate(mid=.fitted,
+         lower=.fitted-1.96*.se.fit,
+         upper=.fitted+1.96*.se.fit) %>% 
+  mutate(across(c(mid,lower,upper),~ifelse(Model=="lm",.x,logistic(.x))) ) -> pred_age
+
+# Education variable:
+ess %>% group_by(edu) %>% 
+  summarize(n()) -> pred_edu
+mapply(augment,list(lm = m3, lr= m4),
+       MoreArgs = list(newdata=pred_edu,type.predict="link",se_fit=T),SIMPLIFY = F) %>% 
+bind_rows(.id="Model") %>% 
+  mutate(mid=.fitted,
+         lower=.fitted-1.96*.se.fit,
+         upper=.fitted+1.96*.se.fit) %>% 
+  mutate(across(c(mid,lower,upper),~ifelse(Model=="lm",.x,logistic(.x))) ) -> pred_educ
+# Full model
+
+ess %>% modelr::data_grid(agea,edu) -> pred_all
+mapply(augment,list(lm = m5, lr = m6),
+       MoreArgs = list(newdata=pred_all,type.predict="link",se_fit=T),SIMPLIFY = F) %>% bind_rows( .id="Model") %>% 
+  mutate(mid=.fitted,
+         lower=.fitted-1.96*.se.fit,
+         upper=.fitted+1.96*.se.fit) %>% 
+  mutate(across(c(mid,lower,upper),~ifelse(Model=="lm",.x,logistic(.x))) ) -> pred_all
+```
+
+# Problem 1: Marginal Effects
+### Estimate models: estimate both linear probability and logistic regression models:
+Table1 shows the estimated linear and logistic models for both age and education as explanatory variables. I also plot the predicted probabilities as a function of age, with a prediction line for each educational category (Figure 1). where we see that the predicted probabilities of being frequent internet user is higher among people with higher education grades "MA/BA".
+
+```{r, echo=FALSE}
+pred_all %>% 
+  ggplot(data=.,mapping=aes(x=agea,y=mid,group=edu,color=edu)) +
+  geom_line(mapping=aes(x=agea,y=mid,size="No Controls",group=NULL),color="black",data=pred_age) +
+  geom_line() +
+  facet_grid(cols=vars(Model),rows=NULL) +
+  labs(x="Age, years", y="Pr. frequent internet use", 
+       size="Bivariate",color="Full Model", caption="Source: 2010 ESS")  
+```
+  
+  
+### Estimate the average marginal effects for all covariates:
+In order to understand the marginal effects of covariates i.e how changes in the the explanatory variables lead to changes in the outcome so here I estimate the average marginal effects for linear model first, the same for logistic model too. then I will compare them.
+
+Table2 shows the average marginal effects for linear probability model, the values in col (AME) match exactly the coefficients of variables in Table1, col(1). Here we concludes that the marginal effects for variables in linear probability model are as same as the coefficients of these variables.
+
+Table3 shows marginal effect for logistic model where values in col (AME) are different comparing to  output of variables in table1, col(2) as the predictors in logistic models affect the log odds of the outcome.
+
+### Estimate the average marginal effects of age,for each educational category:
+In order to get more details about the marginal effect of age but for each educational category, I use the original data, group it by the education category and summarize the margins for this data. from table 4, we notice that the marginal effect is higher for who have MA or BA level of education. that means that we get greater effect for being frequent internet user for people with high level of education.
+
+Comparing Table3 with Table4, we notice different patterns for each edu category in table 4. it is because we are splitting by edu group, so each category will be estimated by other factors and we get different results.
+
+The marginal effect of education categories in table4 refer to the derivative of the coefficients and other probabilities of covariates. when comparing them to the coefficients of the linear probability model in Table1, col(1), we find the outputs are similar in values.
+
+# Problem 2: Model Fits
+ 
+In these days, attitudes about creativity is important to our development in various fields and internet is considered as an interface for preceived entertainment, valuable information and the social interaction that might affect our creativity. for example, online writers use the internet to grasp information and resources that might increase their creativity. Also at online market, many researches are conducted on how to attract consumers for web advertising. People who work in this field need to be creative to attract consumers and use digital online programs to carry out things which require  frequent use of internet.
+
+In this paper, the variable "ipcrtiv" is an ordinal variable measured with scale from 0 to 5. the scale of this variable is with 5 categories. I think attitudes about creativity can be treated as continuous as the categories as a whole not definite but range between not like, little like, somewhat like... so it is better to get percentage rate of attitudes to creativity.
+
+### Estimate two logistic regression models:
+Now I will estimate two logistic regression models including the importance of being creative as an explanatory variable. One model with `ipcrtiv` as a continuous covariate while the other model with `ipcrtiv`as a factor variable (Table5).there is a significant positive relationship between being creative as a continuous variable and being a frequent internet user at the level p<0.01. The odds of being a frequent user are 21% percent higher for every one unit change in variable "ipcrtiv". For creativity variable as factor, we see for example that the odds of being a frequent user are changed by 1.450 for being creative with category "ipcrtiv2Very much like me". while odds of being a frequent user are changed by 0.580 for variable "ipcrtiv" with category "Not like me". 
+
+It is still difficult to interpret coefficients in their raw form, so we exponentiate coefficients of first model `exp(coef(lr1))` where we control "ipcrtiv" as a continuous variable. We see that the attitude for being creative 1.2 times higher odds of being a frequent internet user
+```{r, echo=FALSE}
+exp(coef(lr1))
+```
+While when we exponentiate coefficients of first model `exp(coef(lr2))` where we control for "ipcrtiv" as a factor variable with categories. We see that for category `ipcrtiv2Very much like me ` nearly 4 times higher odds of of being a frequent internet user and for category `ipcrtiv2Not like me` nearly 2 times higher odds of of being a frequent internet user.
+```{r, echo=FALSE}
+exp(coef(lr2))
+```
+### Explain how the models are nested:
+we assume that models (1 & 3) are nested where model 1 (mo1) is nested in model 3 (mo3) as model3 uses the same variable of model 1 but with specifying one additional parameter to be estimated. Because when we apply constraints to 3 we arrive back to 1 in other words, if we set the coefficient of being creative `ipcrtiv`to 0 in model (mo3) we get back to model (`mo1`).
+
+Model3 represent the null hypothesis that there is no effect for variable `ipcrtiv` as being creative on being a frequent user. while the the model 4 represent the alternative hypothesis that there is an effect for `ipcrtiv` on being a frequent user.while model 5 represent the same alternative hypothesis but with effect for `ipcrtiv` as factor where each scale has different effect.
+
+### Perform likelihood ratio tests:
+To test these hypotheses and compare our three models, we Perform likelihood ratio tests. as see in below table. we notice significant decrease in the log likelihood from -19295 for model1 (null model) to -19069 for model2 to slight decrease -19052 for model 3 (alternative model2). degree in freedom df# 1 represent that there is effect for one parameter of`ipcrtiv` as continuous variable while df#4 represent that there is effect for 4 free parameters of `ipcrtiv` as factor variable. the chisqr for the third model is smaller than second.
+The p values for both models (2 & 3) are significant at the level of 0. here we reject the null model (null hypothesis) as there is a significant effect for being creative  on being a frequent internet user. and we conclude that the model 4 with three predictors fits significantly better than model 3 with two predictors.
+
+### Compare the models using BIC statistics:
+Now we compare the models 1 & 3 by using BIC statistics, In table7, we find that BIC of model 3 (38241) is smaller than model1 (38674).and we prefer model with smaller BIC.
+
+Now we form a table of contrast (Table8), so we can figure out the difference of BIC for model3 vs. model1 (m3 vs. m1) `deltaBIC`#-433 with p value = 0 so we prefer model 3. That means that we have a strong evidence that model3 improve model fit in a parsimonious way.
+so BIC and likelihood test are giving a similar conclusion to prefer model 3:
+- BIC decrease from model 1 to model 3 predicts that estimating for being creative (ipcrtiv2) would improve model fit in a parsimonious way.
+- likelihood ratio test tells that estimating for being creative (ipcrtiv2)would improve model fit too.
+
+
+
+
+```{r, echo=FALSE, warning=FALSE}
+# Put  estimates into a well labeled regression table.
+
+stargazer(list(m5, m6), 
+          header=F, 
+          title="(\\#tab:lrs) Table1: Linear probabiliy model and Logistic model of frequent internet use", 
+          notes=c("Data from 2010 European Social Survey"),
+          covariate.labels = c("Age, years",paste0("Educ: ",edu_labs[-1])),
+          keep.stat=c("n","ll"),
+          dep.var.caption = "", dep.var.labels.include = F, font.size="scriptsize", type = "text")
+```
+
+  
+  
+```{r, echo=FALSE}
+
+# estimate the average marginal effects using margins for the linear probability model:
+lm_marg <- summary(margins(m5))
+
+kbl(lm_marg,booktabs=T, align = "c", linesep="", position="h", caption="Table2: average marginal effects of linear probability model") %>% 
+  row_spec(0,align="c") %>% 
+  row_spec(nrow(t)-1,hline_after = T) %>%
+  kable_styling(font_size=14)
+```
+  
+  
+  
+
+```{r, echo=FALSE}
+# estimate the lm average marginal effects for logistic using margins
+ame<-summary(margins(m6))
+
+kbl(ame,booktabs=T, align = "c", linesep="", position="h", caption="Table3: average marginal effects of logistic model") %>% 
+  row_spec(0,align="c") %>% 
+  row_spec(nrow(t)-1,hline_after = T) %>%
+  kable_styling(font_size=14)
+```
+  
+  
+
+```{r, echo=FALSE}
+## create a table Marginal effects of age  for each educational category
+ame.group<- ess %>% 
+  group_by(edu) %>% 
+  group_modify(~summary(margins(m6,data=.x)),.keep=T,iterations=200) 
+kbl(ame.group,booktabs=T, align = "c", linesep="", position="h", caption="Table4:  Marginal effects of age  for each educational category") %>% 
+  row_spec(0,align="c") %>% 
+  row_spec(nrow(t)-1,hline_after = T) %>%
+  kable_styling(font_size=10)
+```
+  
+  
+
+```{r, echo=FALSE, warning=FALSE}
+
+stargazer(list(lr1, lr2), 
+          header=F, 
+          title="(\\#tab:lrs) Table5: Logistic models of frequent internet use by the attitude of creativity", 
+          notes=c("Data from 2010 European Social Survey"),
+          keep.stat=c("n","ll"),
+          dep.var.caption = "", dep.var.labels.include = F, font.size="scriptsize", type = "text")
+```
+  
+  
+
+```{r, echo= FALSE}
+
+## sestimating likelihood ratio tests
+library(kableExtra)
+likelihoodr_test <- lrtest(mo1, mo2, mo3)
+
+likelihoodr_test %>% 
+kbl(caption="Table6: likelihood ratio tests for models of 2010 european survey",
+booktabs=T,) %>% kable_classic()
+```
+
+
+```{r, echo=FALSE}
+
+fits<-lapply(list(m1=mo1, m3 = mo3),glance) %>% bind_rows(.id="model")
+
+# put into a table:
+fits %>% mutate(Parameters=nobs-df.residual) %>% rename(Model=model,
+"Log likelihood"=logLik) %>%
+select(Model,`Log likelihood`,BIC,Parameters) %>% kbl(caption="Table7:Fits statistics for models of 2010 european survey",
+booktabs=T,) %>% kable_classic()
+```
+
+```{r, echo=FALSE, size="footnotesize", warning=FALSE}
+fits %>% 
+  full_join(fits, by=character()) %>% 
+  mutate(Chi2=deviance.x-deviance.y, 
+         df = df.residual.x-df.residual.y,
+         deltaBIC = BIC.y-BIC.x,
+         Contrast = paste(model.y,"vs.",model.x)) %>% 
+  mutate("p-value"=pchisq(Chi2,df,lower.tail=F)) %>% 
+  select(Contrast,Chi2, df,"p-value",deltaBIC) %>% 
+  kbl(caption="Table8: Model fit contrasts, models of frequent internet use",
+      booktabs=T) %>% 
+  kable_classic()
+```
